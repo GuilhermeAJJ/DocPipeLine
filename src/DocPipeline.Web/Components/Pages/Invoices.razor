@@ -1,0 +1,125 @@
+@page "/"
+@page "/invoices"
+@using DocPipeline.Core
+@using DocPipeline.Web.Services
+@inject InvoiceQueryService Query
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+
+<PageTitle>Faturas Processadas</PageTitle>
+
+<h1>Faturas Processadas</h1>
+<p class="text-muted">Todas as faturas que passaram pelo pipeline, com a análise da IA.</p>
+
+<div class="d-flex align-items-center gap-2 mb-3">
+    <label class="form-label mb-0">Filtrar por status:</label>
+    <select class="form-select w-auto" @bind="_filter">
+        <option value="">Todos</option>
+        <option value="@ReviewStatus.AutoApproved">Auto-aprovadas</option>
+        <option value="@ReviewStatus.PendingReview">Em revisão</option>
+        <option value="@ReviewStatus.HumanApproved">Aprovadas por humano</option>
+        <option value="@ReviewStatus.Rejected">Reprovadas</option>
+        <option value="@ReviewStatus.Failed">Falhas</option>
+    </select>
+    <button class="btn btn-outline-secondary btn-sm" @onclick="LoadAsync">Atualizar</button>
+</div>
+
+@if (_loading)
+{
+    <p><em>Carregando…</em></p>
+}
+else if (_error is not null)
+{
+    <div class="alert alert-danger">Erro ao consultar o Cosmos: @_error</div>
+}
+else
+{
+    var rows = Filtered();
+    <p class="text-muted">@rows.Count fatura(s).</p>
+    <table class="table table-striped align-middle">
+        <thead>
+            <tr>
+                <th>Fornecedor</th>
+                <th>Total</th>
+                <th>Status</th>
+                <th>Categoria (IA)</th>
+                <th>Resumo (IA)</th>
+                <th>Confiança</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var inv in rows)
+            {
+                <tr>
+                    <td>
+                        @(inv.Enrichment?.NormalizedVendor ?? inv.VendorName)
+                        <div class="text-muted small">@inv.BlobName</div>
+                    </td>
+                    <td>@inv.InvoiceTotal.Value</td>
+                    <td>@StatusBadge(inv.Status)</td>
+                    <td>
+                        @if (!string.IsNullOrWhiteSpace(inv.Enrichment?.Category))
+                        {
+                            <span class="badge bg-info text-dark">@inv.Enrichment!.Category</span>
+                        }
+                        else
+                        {
+                            <span class="text-muted small">—</span>
+                        }
+                    </td>
+                    <td class="small">@(inv.Enrichment?.Summary ?? "—")</td>
+                    <td><span class="text-muted">@inv.MinConfidence.ToString("P0")</span></td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private bool _loading = true;
+    private string? _error;
+    private string _filter = "";
+    private IReadOnlyList<InvoiceDocument> _all = Array.Empty<InvoiceDocument>();
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            _all = await Query.GetAllAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private List<InvoiceDocument> Filtered()
+    {
+        if (string.IsNullOrEmpty(_filter) || !Enum.TryParse<ReviewStatus>(_filter, out var status))
+        {
+            return _all.ToList();
+        }
+        return _all.Where(i => i.Status == status).ToList();
+    }
+
+    private static RenderFragment StatusBadge(ReviewStatus status) => __builder =>
+    {
+        var (css, label) = status switch
+        {
+            ReviewStatus.AutoApproved => ("bg-success", "Auto-aprovada"),
+            ReviewStatus.PendingReview => ("bg-warning text-dark", "Em revisão"),
+            ReviewStatus.HumanApproved => ("bg-primary", "Aprovada (humano)"),
+            ReviewStatus.Rejected => ("bg-dark", "Reprovada"),
+            ReviewStatus.Failed => ("bg-danger", "Falha"),
+            _ => ("bg-secondary", status.ToString())
+        };
+        <span class="badge @css">@label</span>
+    };
+}

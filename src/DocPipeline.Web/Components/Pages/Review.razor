@@ -1,0 +1,284 @@
+@page "/review"
+@using DocPipeline.Core
+@using DocPipeline.Web.Services
+@inject InvoiceQueryService Invoices
+@inject InvoiceReviewService ReviewService
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+
+<PageTitle>Fila de Revisão</PageTitle>
+
+<h1>Fila de Revisão Humana</h1>
+<p class="text-muted">
+    Faturas cuja confiança ficou abaixo do limite — clique numa linha, corrija os campos
+    e confirme para aprovar.
+</p>
+
+@if (_message is not null)
+{
+    <div class="alert alert-success alert-dismissible">
+        @_message
+        <button type="button" class="btn-close" @onclick="() => _message = null"></button>
+    </div>
+}
+
+@if (_loading)
+{
+    <p><em>Carregando…</em></p>
+}
+else if (_error is not null)
+{
+    <div class="alert alert-danger">Erro ao consultar o Cosmos: @_error</div>
+}
+else if (_items.Count == 0)
+{
+    <div class="alert alert-success">Nada na fila — tudo foi processado automaticamente. 🎉</div>
+}
+else
+{
+    <div class="row">
+        <div class="col-lg-5">
+            <table class="table table-hover">
+                <thead>
+                    <tr>
+                        <th>Fornecedor</th>
+                        <th>Nº Fatura</th>
+                        <th>Total</th>
+                        <th>Confiança mín.</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var inv in _items)
+                    {
+                        <tr class="@(ReferenceEquals(inv, _selected) ? "table-active" : null)"
+                            style="cursor:pointer" @onclick="() => Select(inv)">
+                            <td>@inv.VendorName</td>
+                            <td>@inv.InvoiceId.Value</td>
+                            <td>@inv.InvoiceTotal.Value</td>
+                            <td><span class="badge bg-warning text-dark">@inv.MinConfidence.ToString("P0")</span></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <div class="col-lg-7">
+            @if (_selected is null)
+            {
+                <div class="alert alert-info">Selecione uma fatura na tabela para revisar.</div>
+            }
+            else
+            {
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>Revisando: <strong>@_selected.BlobName</strong></span>
+                        <span class="badge bg-secondary">conf. mín. @_selected.MinConfidence.ToString("P0")</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label d-flex justify-content-between">
+                                <span>Documento original</span>
+                                <a href="@FileUrl(_selected.BlobName)" target="_blank" class="small">abrir em nova aba ↗</a>
+                            </label>
+                            @if (IsPdf(_selected.BlobName))
+                            {
+                                <iframe src="@FileUrl(_selected.BlobName)" class="w-100 border rounded" style="height:430px"
+                                        title="Fatura"></iframe>
+                            }
+                            else
+                            {
+                                <a href="@FileUrl(_selected.BlobName)" target="_blank">
+                                    <img src="@FileUrl(_selected.BlobName)" class="img-fluid border rounded"
+                                         style="max-height:430px" alt="Fatura" />
+                                </a>
+                            }
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label">Fornecedor (chave de partição)</label>
+                            <input class="form-control" @bind="_selected.VendorName" />
+                        </div>
+
+                        @FieldEditor("Nº da Fatura", _selected.InvoiceId)
+                        @FieldEditor("Valor Total", _selected.InvoiceTotal)
+                        @FieldEditor("Data de Emissão", _selected.InvoiceDate)
+                        @FieldEditor("Data de Vencimento", _selected.DueDate)
+
+                        @if (_selected.Enrichment is { } enr)
+                        {
+                            <div class="alert alert-light border mb-3">
+                                <div class="fw-bold mb-1">✨ Análise da IA</div>
+                                @if (!string.IsNullOrWhiteSpace(enr.Summary))
+                                {
+                                    <p class="mb-2">@enr.Summary</p>
+                                }
+                                <div class="d-flex gap-2 flex-wrap">
+                                    @if (!string.IsNullOrWhiteSpace(enr.Category))
+                                    {
+                                        <span class="badge bg-info text-dark">@enr.Category</span>
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(enr.NormalizedVendor))
+                                    {
+                                        <span class="badge bg-light text-dark border">Fornecedor: @enr.NormalizedVendor</span>
+                                    }
+                                </div>
+                            </div>
+                        }
+
+                        @if (_selected.LineItems.Count > 0)
+                        {
+                            <details class="mb-3">
+                                <summary class="text-muted">@_selected.LineItems.Count itens de linha</summary>
+                                <table class="table table-sm mt-2">
+                                    <thead><tr><th>Descrição</th><th>Qtd</th><th>Unit.</th><th>Valor</th></tr></thead>
+                                    <tbody>
+                                        @foreach (var li in _selected.LineItems)
+                                        {
+                                            <tr><td>@li.Description</td><td>@li.Quantity</td><td>@li.UnitPrice</td><td>@li.Amount</td></tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </details>
+                        }
+
+                        @if (_selected.ErrorMessage is not null)
+                        {
+                            <div class="alert alert-warning py-2">Erro na extração: @_selected.ErrorMessage</div>
+                        }
+
+                        <div class="mb-3">
+                            <label class="form-label">Motivo (obrigatório para reprovar)</label>
+                            <textarea class="form-control" rows="2" @bind="_rejectReason"
+                                      placeholder="Ex.: fora do escopo da empresa, faltam dados, fatura duplicada…"></textarea>
+                        </div>
+
+                        <div class="d-flex gap-2">
+                            <button class="btn btn-success" @onclick="Approve" disabled="@_saving">
+                                @(_saving ? "Salvando…" : "Confirmar e aprovar")
+                            </button>
+                            <button class="btn btn-danger" @onclick="Reject"
+                                    disabled="@(_saving || string.IsNullOrWhiteSpace(_rejectReason))">
+                                Reprovar
+                            </button>
+                            <button class="btn btn-outline-secondary" @onclick="() => _selected = null" disabled="@_saving">
+                                Cancelar
+                            </button>
+                        </div>
+                        @if (_saveError is not null)
+                        {
+                            <div class="alert alert-danger mt-3 py-2">Falha ao salvar: @_saveError</div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    private bool _loading = true;
+    private bool _saving;
+    private string? _error;
+    private string? _saveError;
+    private string? _message;
+    private List<InvoiceDocument> _items = new();
+
+    private InvoiceDocument? _selected;
+    private string _originalVendor = string.Empty;
+    private string? _rejectReason;
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            var results = await Invoices.GetByStatusAsync(ReviewStatus.PendingReview);
+            _items = results.ToList();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void Select(InvoiceDocument inv)
+    {
+        _selected = inv;
+        _originalVendor = inv.VendorName; // capture before edits — it's the partition key
+        _rejectReason = null;
+        _saveError = null;
+    }
+
+    private static string FileUrl(string blobName) => $"/files/{Uri.EscapeDataString(blobName)}";
+    private static bool IsPdf(string? blobName) =>
+        blobName?.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) == true;
+
+    private async Task Approve()
+    {
+        if (_selected is null) return;
+        _saving = true;
+        _saveError = null;
+        try
+        {
+            await ReviewService.ApproveAsync(_selected, _originalVendor);
+            _items.Remove(_selected);
+            _message = $"Fatura de \"{_selected.VendorName}\" aprovada e gravada no Cosmos.";
+            _selected = null;
+        }
+        catch (Exception ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task Reject()
+    {
+        if (_selected is null || string.IsNullOrWhiteSpace(_rejectReason)) return;
+        _saving = true;
+        _saveError = null;
+        try
+        {
+            await ReviewService.RejectAsync(_selected, _originalVendor, _rejectReason);
+            _items.Remove(_selected);
+            _message = $"Fatura de \"{_selected.VendorName}\" reprovada. Motivo registrado.";
+            _selected = null;
+            _rejectReason = null;
+        }
+        catch (Exception ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    // Inline field editor with a confidence badge that warns when the model was unsure.
+    private RenderFragment FieldEditor(string label, ExtractedField field) => __builder =>
+    {
+        <div class="mb-3">
+            <label class="form-label d-flex justify-content-between">
+                <span>@label</span>
+                @if (field.Confidence is float c)
+                {
+                    <span class="badge @(c < 0.80f ? "bg-warning text-dark" : "bg-success")">@c.ToString("P0")</span>
+                }
+                else
+                {
+                    <span class="badge bg-secondary">ausente</span>
+                }
+            </label>
+            <input class="form-control @(field.Confidence < 0.80f ? "border-warning" : null)" @bind="field.Value" />
+        </div>
+    };
+}

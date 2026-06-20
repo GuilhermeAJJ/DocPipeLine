@@ -1,0 +1,21 @@
+## .NET build output
+bin/
+obj/
+*.user
+.vs/
+
+## Azure Functions local settings (may contain endpoints/keys)
+local.settings.json
+**/local.settings.json
+
+## Rider / VS Code
+.idea/
+.vscode/
+
+## Bicep compiled output (artifacts of `az bicep build`)
+infra/*.json
+!infra/*.parameters.json
+
+## OS
+.DS_Store
+Thumbs.db
